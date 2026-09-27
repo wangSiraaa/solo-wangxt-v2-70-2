@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { SliceView } from './components/SliceView';
 import { SidePanel } from './components/SidePanel';
 import { StatusBar } from './components/StatusBar';
+import { ImportAnnotationsModal } from './components/ImportAnnotationsModal';
 import { useStore } from './state/store';
 
 export default function App() {
@@ -36,6 +37,7 @@ export default function App() {
         <SidePanel />
       </div>
       <StatusBar />
+      <ImportAnnotationsModal />
     </div>
   );
 }

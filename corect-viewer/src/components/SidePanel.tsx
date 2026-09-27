@@ -12,6 +12,7 @@ const TOOLS: { id: Tool; label: string; hint: string }[] = [
 
 export function SidePanel() {
   const fileRef = useRef<HTMLInputElement>(null);
+  const annotationRef = useRef<HTMLInputElement>(null);
   const s = useStore();
 
   const activeRoi = s.rois.find((r) => r.id === s.activeRoiId) ?? null;
@@ -70,6 +71,32 @@ export function SidePanel() {
                 {s.volume.min} ~ {s.volume.max}
               </span>
             </div>
+          </section>
+
+          <section>
+            <h3>标注包</h3>
+            <div className="btn-row">
+              <button onClick={() => void s.exportAnnotationPackage()}>导出 JSON</button>
+              <button onClick={() => annotationRef.current?.click()}>导入 JSON</button>
+              <input
+                ref={annotationRef}
+                type="file"
+                accept=".json,application/json"
+                hidden
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void s.previewAnnotationFile(f);
+                  e.target.value = '';
+                }}
+              />
+            </div>
+            {s.lastImportSource ? (
+              <div className="hint" title={`SHA-256：${s.lastImportSource.fileDigestSHA256}`}>
+                最近导入：{s.lastImportSource.fileName}（v{s.lastImportSource.sourceFormatVersion}）
+              </div>
+            ) : (
+              <div className="hint">导入前会先校验体数据摘要和坐标边界。</div>
+            )}
           </section>
 
           <section>
@@ -166,8 +193,11 @@ export function SidePanel() {
               {s.measurements.map((m) => (
                 <li key={m.id}>
                   <span>
-                    ({m.p1.join(', ')}) → ({m.p2.join(', ')}) ={' '}
-                    <b>{physicalDistance(m.p1, m.p2, s.volume!.header.spacing).toFixed(2)} mm</b>
+                    <b>{m.label || `测量 ${s.measurements.indexOf(m) + 1}`}</b>{' '}
+                    <span className="muted">
+                      ({m.p1.join(', ')}) → ({m.p2.join(', ')}) ={' '}
+                      <b>{physicalDistance(m.p1, m.p2, s.volume!.header.spacing).toFixed(2)} mm</b>
+                    </span>
                   </span>
                   <button className="danger" onClick={() => s.deleteMeasurement(m.id)}>
                     ×
@@ -184,6 +214,7 @@ export function SidePanel() {
               {s.rois.map((r) => (
                 <li key={r.id} className={r.id === s.activeRoiId ? 'active' : ''}>
                   <button className="link" onClick={() => s.setActiveRoi(r.id)}>
+                    {r.label ? `${r.label} · ` : ''}
                     {VIEW_CONFIGS[r.axis].label} {r.axis === 0 ? 'I' : r.axis === 1 ? 'J' : 'K'}=
                     {r.slice}，[{r.min[0]}..{r.max[0]}]×[{r.min[1]}..{r.max[1]}]（
                     {(r.max[0] - r.min[0] + 1) * (r.max[1] - r.min[1] + 1)} 体素）

@@ -4,6 +4,8 @@ import { voxelIndex, type PlaneAxis } from './viewMath';
 /** 距离测量标注：两个体素索引点 */
 export interface Measurement {
   id: string;
+  /** 用户可在导入冲突时修改的显示名称 */
+  label?: string;
   p1: Vec3;
   p2: Vec3;
   createdAt: number;
@@ -12,6 +14,8 @@ export interface Measurement {
 /** 矩形兴趣区：某切面某层上的 2D 矩形（体素索引，闭区间） */
 export interface Roi {
   id: string;
+  /** 用户可在导入冲突时修改的显示名称 */
+  label?: string;
   /** 所在切面轴向 */
   axis: PlaneAxis;
   /** 所在层号 */
