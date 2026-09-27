@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { Vec3 } from '../format/corevol';
+import type { DisplaySettings, ImportSourceSummary } from '../format/annotationPack';
 import type { Measurement, Roi } from '../geometry/roi';
 
 export interface ProjectRecord {
@@ -15,6 +16,8 @@ export interface AnnotationRecord {
   measurements: Measurement[];
   rois: Roi[];
   crosshair: Vec3;
+  displaySettings?: DisplaySettings;
+  importHistory?: ImportSourceSummary[];
   updatedAt: number;
 }
 
@@ -33,6 +36,10 @@ const DB_NAME = 'corect-viewer';
 const DB_VERSION = 1;
 
 let dbPromise: Promise<IDBPDatabase<CoreCtDB>> | null = null;
+
+export function __resetProjectDbForTests(): void {
+  dbPromise = null;
+}
 
 function getDb(): Promise<IDBPDatabase<CoreCtDB>> {
   if (!dbPromise) {
@@ -66,7 +73,8 @@ export async function getProject(id: string): Promise<ProjectRecord | undefined>
 
 export async function deleteProject(id: string): Promise<void> {
   const db = await getDb();
-  await Promise.all([db.delete('projects', id), db.delete('annotations', id)]);
+  const tx = db.transaction(['projects', 'annotations'], 'readwrite');
+  await Promise.all([tx.objectStore('projects').delete(id), tx.objectStore('annotations').delete(id), tx.done]);
 }
 
 export async function saveAnnotations(record: AnnotationRecord): Promise<void> {
@@ -77,4 +85,12 @@ export async function saveAnnotations(record: AnnotationRecord): Promise<void> {
 export async function getAnnotations(projectId: string): Promise<AnnotationRecord | undefined> {
   const db = await getDb();
   return db.get('annotations', projectId);
+}
+
+/** 标注导入只允许这一次读写事务落库；任一存储失败则整体回滚。 */
+export async function commitAnnotationImport(record: AnnotationRecord): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction('annotations', 'readwrite');
+  await tx.store.put(record);
+  await tx.done;
 }

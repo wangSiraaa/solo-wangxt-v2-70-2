@@ -4,14 +4,25 @@ import type { Measurement, Roi } from '../geometry/roi';
 import { clampIjk } from '../geometry/viewMath';
 import { decodeVolumeInWorker } from '../workers/decodeClient';
 import {
+  commitAnnotationImport,
   deleteProject as dbDeleteProject,
   getAnnotations,
   getProject,
   listProjects,
   saveAnnotations,
   saveProject,
+  type AnnotationRecord,
   type ProjectMeta,
 } from '../db/projectDb';
+import {
+  buildCommittedAnnotationRecord,
+  createAnnotationPack,
+  previewAnnotationPack,
+  type AnnotationImportPreview,
+  type DisplaySettings,
+  type ImportMode,
+  type ImportSourceSummary,
+} from '../format/annotationPack';
 
 export type Tool = 'navigate' | 'measure' | 'roi';
 
@@ -37,6 +48,13 @@ export interface AppState {
   activeRoiId: string | null;
   /** 测量工具：已落下的第一个点（可跨视图完成第二点） */
   pendingMeasure: Vec3 | null;
+  importPreview: AnnotationImportPreview | null;
+  importFileName: string | null;
+  importFileSize: number;
+  importMode: ImportMode;
+  importResolutions: Record<string, string>;
+  acceptLegacyImport: boolean;
+  importHistory: ImportSourceSummary[];
 
   refreshProjectList: () => Promise<void>;
   loadSample: () => Promise<void>;
@@ -55,11 +73,26 @@ export interface AppState {
   deleteMeasurement: (id: string) => void;
   deleteRoi: (id: string) => void;
   setActiveRoi: (id: string | null) => void;
+
+  exportAnnotations: () => Promise<void>;
+  previewAnnotationImport: (file: File) => Promise<void>;
+  setImportMode: (mode: ImportMode) => Promise<void>;
+  setImportResolution: (key: string, id: string) => void;
+  setAcceptLegacyImport: (accept: boolean) => void;
+  cancelAnnotationImport: () => void;
+  confirmAnnotationImport: () => Promise<void>;
 }
 
 function defaultWindowLevel(volume: DecodedVolume): { window: number; level: number } {
   const range = volume.max - volume.min;
   return { window: Math.max(range, 1), level: volume.min + range / 2 };
+}
+
+function defaultDisplaySettings(volume: DecodedVolume): DisplaySettings {
+  return {
+    windowLevel: defaultWindowLevel(volume),
+    threshold: volume.min + (volume.max - volume.min) * 0.6,
+  };
 }
 
 export const useStore = create<AppState>()((set, get) => ({
@@ -77,6 +110,13 @@ export const useStore = create<AppState>()((set, get) => ({
   rois: [],
   activeRoiId: null,
   pendingMeasure: null,
+  importPreview: null,
+  importFileName: null,
+  importFileSize: 0,
+  importMode: 'merge',
+  importResolutions: {},
+  acceptLegacyImport: false,
+  importHistory: [],
 
   refreshProjectList: async () => {
     set({ projects: await listProjects() });
@@ -129,6 +169,12 @@ export const useStore = create<AppState>()((set, get) => ({
         activeRoiId: null,
         pendingMeasure: null,
         crosshair: [0, 0, 0],
+        importPreview: null,
+        importFileName: null,
+        importFileSize: 0,
+        importResolutions: {},
+        acceptLegacyImport: false,
+        importHistory: [],
       });
       localStorage.removeItem(LAST_PROJECT_KEY);
     }
@@ -187,6 +233,133 @@ export const useStore = create<AppState>()((set, get) => ({
     }),
 
   setActiveRoi: (id) => set({ activeRoiId: id }),
+
+  exportAnnotations: async () => {
+    const s = get();
+    if (!s.volume || !s.projectId) throw new Error('没有可导出的工程');
+    const pack = await createAnnotationPack({
+      volume: s.volume,
+      measurements: s.measurements,
+      rois: s.rois,
+      crosshair: s.crosshair,
+      displaySettings: {
+        windowLevel: s.windowLevel,
+        threshold: s.threshold,
+      },
+    });
+    const blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${s.projectName || s.projectId}-annotations.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
+  previewAnnotationImport: async (file) => {
+    const s = get();
+    if (!s.volume) throw new Error('请先打开体数据工程，再导入标注包');
+    const text = await file.text();
+    const mode = get().importMode;
+    const preview = await previewAnnotationPack({
+      text,
+      mode,
+      volume: s.volume,
+      measurements: s.measurements,
+      rois: s.rois,
+    });
+    set({
+      importPreview: preview,
+      importFileName: file.name,
+      importFileSize: file.size,
+      importResolutions: { ...preview.resolutions },
+      acceptLegacyImport: false,
+      error: null,
+    });
+  },
+
+  setImportMode: async (mode) => {
+    const s = get();
+    set({ importMode: mode });
+    if (!s.importPreview || !s.importFileName || !s.volume) return;
+    try {
+      const file = new File([JSON.stringify(s.importPreview.pack)], s.importFileName, {
+        type: 'application/json',
+      });
+      const preview = await previewAnnotationPack({
+        text: await file.text(),
+        mode,
+        volume: s.volume,
+        measurements: s.measurements,
+        rois: s.rois,
+      });
+      set({
+        importPreview: preview,
+        importResolutions: { ...preview.resolutions },
+        acceptLegacyImport: false,
+        error: null,
+      });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  setImportResolution: (key, id) =>
+    set((state) => ({ importResolutions: { ...state.importResolutions, [key]: id } })),
+
+  setAcceptLegacyImport: (accept) => set({ acceptLegacyImport: accept }),
+
+  cancelAnnotationImport: () =>
+    set({
+      importPreview: null,
+      importFileName: null,
+      importFileSize: 0,
+      importResolutions: {},
+      acceptLegacyImport: false,
+    }),
+
+  confirmAnnotationImport: async () => {
+    const s = get();
+    if (!s.volume || !s.projectId || !s.importPreview || !s.importFileName) return;
+    const committed = buildCommittedAnnotationRecord({
+      projectId: s.projectId,
+      preview: s.importPreview,
+      mode: s.importMode,
+      resolutions: s.importResolutions,
+      acceptLegacy: s.acceptLegacyImport,
+      existing: {
+        measurements: s.measurements,
+        rois: s.rois,
+        importHistory: s.importHistory,
+      },
+      fallbackDisplaySettings: {
+        windowLevel: s.windowLevel,
+        threshold: s.threshold,
+      },
+      source: { fileName: s.importFileName, fileSize: s.importFileSize },
+    });
+    await commitAnnotationImport(committed.record);
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    set({
+      measurements: committed.record.measurements,
+      rois: committed.record.rois,
+      crosshair: committed.record.crosshair,
+      windowLevel: committed.record.displaySettings.windowLevel,
+      threshold: committed.record.displaySettings.threshold,
+      importHistory: committed.record.importHistory,
+      activeRoiId: null,
+      pendingMeasure: null,
+      importPreview: null,
+      importFileName: null,
+      importFileSize: 0,
+      importResolutions: {},
+      acceptLegacyImport: false,
+      error: null,
+    });
+  },
 }));
 
 type Set = (partial: Partial<AppState>) => void;
@@ -212,6 +385,7 @@ async function openBuffer(projectId: string, buffer: ArrayBuffer, set: Set, _get
     [Math.floor(dims[0] / 2), Math.floor(dims[1] / 2), Math.floor(dims[2] / 2)],
     dims,
   );
+  const displaySettings = saved?.displaySettings ?? defaultDisplaySettings(volume);
   set({
     status: 'ready',
     error: null,
@@ -223,34 +397,51 @@ async function openBuffer(projectId: string, buffer: ArrayBuffer, set: Set, _get
     rois: saved?.rois ?? [],
     activeRoiId: null,
     pendingMeasure: null,
-    windowLevel: defaultWindowLevel(volume),
-    threshold: volume.min + (volume.max - volume.min) * 0.6,
+    windowLevel: displaySettings.windowLevel,
+    threshold: displaySettings.threshold,
+    importHistory: saved?.importHistory ?? [],
+    importPreview: null,
+    importFileName: null,
+    importFileSize: 0,
+    importResolutions: {},
+    acceptLegacyImport: false,
     projects: await listProjects(),
   });
   localStorage.setItem(LAST_PROJECT_KEY, projectId);
 }
 
-// 标注/十字丝变化后防抖写入 IndexedDB —— 刷新页面不丢失
+function saveCurrentAnnotations(s: AppState): Promise<void> | undefined {
+  if (!s.projectId) return;
+  const record: AnnotationRecord = {
+    projectId: s.projectId,
+    measurements: s.measurements,
+    rois: s.rois,
+    crosshair: s.crosshair,
+    displaySettings: {
+      windowLevel: s.windowLevel,
+      threshold: s.threshold,
+    },
+    importHistory: s.importHistory,
+    updatedAt: Date.now(),
+  };
+  return saveAnnotations(record);
+}
+
+// 标注/显示设置变化后防抖写入 IndexedDB —— 刷新页面不丢失
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 useStore.subscribe((state, prev) => {
   if (!state.projectId || state.status !== 'ready') return;
   if (
     state.measurements === prev.measurements &&
     state.rois === prev.rois &&
-    state.crosshair === prev.crosshair
+    state.crosshair === prev.crosshair &&
+    state.windowLevel === prev.windowLevel &&
+    state.threshold === prev.threshold
   ) {
     return;
   }
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    const s = useStore.getState();
-    if (!s.projectId) return;
-    void saveAnnotations({
-      projectId: s.projectId,
-      measurements: s.measurements,
-      rois: s.rois,
-      crosshair: s.crosshair,
-      updatedAt: Date.now(),
-    });
+    void saveCurrentAnnotations(useStore.getState());
   }, 300);
 });

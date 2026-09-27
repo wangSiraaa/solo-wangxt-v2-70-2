@@ -14,6 +14,9 @@ export function StatusBar() {
   if (!volume) {
     return <footer className="status-bar">{status === 'loading' ? '解码中…' : '未加载工程'}</footer>;
   }
+  if (error) {
+    return <footer className="status-bar error">错误：{error}</footer>;
+  }
   const { spacing, origin, dims } = volume.header;
   const world = ijkToWorld(crosshair, spacing, origin);
   const value = volume.data[voxelIndex(crosshair, dims)];
